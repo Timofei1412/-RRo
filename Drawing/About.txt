@@ -1,0 +1,2 @@
+In this folder you can see drawing of Sp-7-fe`s robot.
+Format of file is .step.
