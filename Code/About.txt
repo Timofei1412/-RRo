@@ -1,0 +1,2 @@
+In this folder you can see code of Sp-7-fe`s robot.
+Programming language is python.
