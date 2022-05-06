@@ -1,34 +1,41 @@
-import sensor, image, time,
-import green_and_red as cfunc       # camera functions
+import sensor, image, time, pyb
 
 # === variables ===
+# declarations
+last_saw = 0                        # last time when camera saw object
+past = False                        # is box already behind
+flag = True                         # main loop flag
 B = None                            # pin B
 tim = None                          # timer
 motor = None                        # pwm for motor
-Motor_speed = 0                     # motor speed
+ser = None                          # serial
+cur_com = "None"                    # current command
+line_mutex = "free"                 # manager for line turn
+# options
 cur_ang = 0                         # servo angle
 ang = 10                            # servo angle on detour
 turn = 15                           # servo angle on rotation
-cur_com = "None"                    # current command
-past = False                        # is box already behind
-flag = True                         # main loop flag
+debug = True                        # enable debug information
 speed_of_servo = 1500               # servo rotation speed
-cfunc.set_debug(True)               # set debug mode
-cfunc.set_near_dist_area(4000)      # set minimum distance to box for trigger
-cfunc.set_saw_interval(1000)        # set time (in millis) for box behind
-cfunc.set_wall_diff_normal(500)     # set maximum wall difference
-
-def main_init():
-    # set global variables
-    global B, tim, motor, ser
-    cfunc.camera_init()                                         # init camera
-    B = pyb.Pin('P5', pyb.Pin.OUT_PP)                           # init pin b on P5
-    B.value(1)                                                  # set pin b value
-    tim = pyb.Timer(2, freq=1000)                               # init timer
-    motor = tim.channel(3, pyb.Timer.PWM, pin=pyb.Pin('P4'))    # init motor pwm on P6
-    motor.pulse_width_percent(Motor_speed)                      # start motor
-    ser = pyb.Servo(1)                                          # init servo on P7
-    ser.angle(0)                                                # set servo startup position
+Motor_speed = 0                     # motor speed
+near_dist_area = 700                # distance to box for trigger
+saw_interval = 1000                 # time in millis to rotate back
+wall_diff_normal = 500              # normal difference between walls sizes
+line_min_size = 500                 # minimum size for line to turn
+sensor_color_format = sensor.RGB565 # sensor colors type
+sensor_res = sensor.QQVGA           # sensor resolution
+# Thresholds
+greenTh  = (31, 64, -50, -28, 18, 53)
+redTh    = (19, 60, 29, 80, 6, 54)
+blueTh   = (19, 68, -10, 18, -48, -12)
+orangeTh = (35, 62, 4, 57, -9, 81)
+blackTh  = (0, 18, -15, 9, -12, 13)
+whiteTh  = (59, 100, -10, 4, -12, 3)
+# regions of interests
+boxes_roi = (0, 35, 160, 50)
+wall_left_roi = (0, 0, 80, 95)
+wall_right_roi = (80, 0, 80, 95)
+lines_roi = (0, 64, 160, 34)
 
 
 # === code logic ===
@@ -54,15 +61,165 @@ def main_init():
 
 # === functions ===
 
+def main_init():
+    # set global variables
+    global B, tim, motor, ser, sensor, clock, last_saw
+    # motors part
+    B = pyb.Pin('P5', pyb.Pin.OUT_PP)                           # init pin b on P5
+    B.value(1)                                                  # set pin b value
+    tim = pyb.Timer(2, freq=1000)                               # init timer
+    motor = tim.channel(3, pyb.Timer.PWM, pin=pyb.Pin('P4'))    # init motor pwm on P6
+    motor.pulse_width_percent(Motor_speed)                      # start motor
+    ser = pyb.Servo(1)                                          # init servo on P7
+    ser.angle(0)                                                # set servo startup position
+    # sensor part
+    sensor.reset()                                              # reset previous camera settings
+    sensor.set_pixformat(sensor_color_format)                   # set colored output
+    sensor.set_framesize(sensor_res)                            # set camera size
+    sensor.set_vflip(True)                                      # flip camera view
+    sensor.set_hmirror(True)                                    # mirror camera view
+    sensor.skip_frames(time = 2000)                             # skip some frames for camera initalization
+    clock = time.clock()                                        # start internal timer
+    last_saw = pyb.millis()                                     # setup rotation timer
+
+def debug_roi(img: Image, roi: tuple, color: tuple):
+    if roi == None:
+        return
+    img.draw_rectangle(roi, color=color)
+
+def binary_roi(img: Image, th: list, roi: tuple):
+    img.crop(roi=roi).binary(th)
+
+def debug_blobs(img: Image, blobs: list, color: tuple):
+    '''
+        draw some info about blobl on image
+    '''
+    for blb in blobs:
+        if blb == None:
+            continue
+        img.draw_rectangle(blb.rect(), color=color) # draw rect around the blob
+        img.draw_cross(blb.cx(), blb.cy(), color=color) # draw cross in the center of the blob
+        # print blob's size in the left-top corner
+        img.draw_string(blb.x(), blb.y(), str(blb.area()), color=(0, 255, 255))
+
+
+def find_nearest_blob(blobs: list):
+    ''' find nearest blob in array by its area '''
+    return max(blobs, key=lambda x: x.area(), default=None)
+
+
+def get_nearest_from_two(nearest_blob_red: blob, nearest_blob_green: blob):
+
+    if nearest_blob_red == None and nearest_blob_green == None:
+        nearest_blob = None
+        nearest_col = None
+    elif nearest_blob_red == None:
+        nearest_blob = nearest_blob_green
+        nearest_col = "green"
+    elif nearest_blob_green == None:
+        nearest_blob = nearest_blob_red
+        nearest_col = "red"
+    else:
+        if nearest_blob_green.area() > nearest_blob_red.area():
+            nearest_blob = nearest_blob_green
+            nearest_col = "green"
+        else:
+            nearest_blob = nearest_blob_red
+            nearest_col = "red"
+    return nearest_blob, nearest_col
+
+
+def find_diffs_params(left_wall_pix: int, right_wall_pix: int):
+    # find difference between walls sizes
+    diff = left_wall_pix - right_wall_pix
+
+    # find robot position relative to walls
+    if abs(diff) < wall_diff_normal:
+        diff_res = "normal"
+    elif diff > 0:
+        diff_res = "too_left"
+    elif diff < 0:
+        diff_res = "too_right"
+    else:
+        diff_res = "normal"
+    return diff, diff_res
+
+
+def cam_get_state(flag: bool):
+    ''' get positional information from camera '''
+    # enable camera global control
+    global img, clock, sensor, last_saw, line_mutex
+
+    # internal camera functions
+    clock.tick()
+    img = sensor.snapshot().lens_corr(1.8, 1.0)
+
+    # find blocks
+    blobs_green = img.find_blobs([greenTh], merge=True, roi=boxes_roi)
+    blobs_red = img.find_blobs([redTh], merge=True, roi=boxes_roi)
+
+    # find nearest red and green block
+    # (need to find its color)
+    nearest_blob_red = find_nearest_blob(blobs_red)
+    nearest_blob_green = find_nearest_blob(blobs_green)
+    nearest_blob, cur_com = get_nearest_from_two(nearest_blob_red, nearest_blob_green)
+
+    # set variable for movement
+    if nearest_blob != None and nearest_blob.area() > near_dist_area:
+        last_saw = pyb.millis()
+
+    # find left and right walls sizes
+    left_wall_pix = sum([x.area() for x in img.find_blobs([blackTh], roi=wall_left_roi)])
+    right_wall_pix = sum([x.area() for x in img.find_blobs([blackTh], roi=wall_right_roi)])
+    diff, diff_res = find_diffs_params(left_wall_pix, right_wall_pix)
+
+    orange_line = sum([x.area() for x in img.find_blobs([orangeTh], roi=lines_roi)])
+    blue_line = sum([x.area() for x in img.find_blobs([blueTh], roi=lines_roi)])
+    if orange_line >= line_min_size:
+        if line_mutex == "free" or line_mutex == "after_blue":
+            line_mutex = "orange_line"
+            cur_com = "right"
+        elif line_mutex == "blue_line":
+            line_mutex = "after_orange"
+            cur_com = "None"
+    elif blue_line >= line_min_size:
+        if line_mutex == "free" or line_mutex == "after_orange":
+            line_mutex = "blue_line"
+            cur_com = "left"
+        elif line_mutex == "orange_line":
+            line_mutex = "after_blue"
+            cur_com = "None"
+
+    print(line_mutex)
+
+    # print (and draw) some technical info
+    if debug:
+        if True:
+            binary_roi(img, [orangeTh, blueTh], lines_roi)
+        else:
+            debug_blobs(img, blobs_green, (0, 255, 0))
+            debug_blobs(img, blobs_red, (255, 0, 0))
+            debug_blobs(img, [nearest_blob], (0, 0, 255))
+            debug_roi(img, boxes_roi, (255, 0, 255))
+            debug_roi(img, wall_left_roi, (255, 255, 0))
+            debug_roi(img, wall_right_roi, (0, 0, 255))
+            debug_roi(img, lines_roi, (255, 0, 0))
+
+    # return required information
+    return cur_com, (pyb.millis() - last_saw) > saw_interval, diff_res, flag
+
+
 def main_loop():
+    global ser
     while flag:
         past = None             # already behind
         cur_com = None          # current command
         wall_status = None      # position relative to walls
 
         # get info from camera
-        cur_com, past, wall_status, flag = cfunc.cam_get_state(flag)
+        cur_com = cam_get_state(flag)
 
+        cur_ang = 0
         if cur_com == "green" and past == False:
             cur_ang = ang
         elif cur_com == "red" and past == False:
@@ -75,8 +232,6 @@ def main_loop():
             cur_ang = turn
         elif cur_com == "left":
             cur_ang = -turn
-        else:
-            cur_ang = 0
 
         ser.angle(cur_ang)
         # ser.angle(cur_ang, speed_of_servo)
@@ -89,7 +244,6 @@ def main():
     main_loop()
     ser.angle(0)                    # return servo to normal position
     motor.pulse_width_percent(0)    # speed down
-
 
 # execute code
 main()
