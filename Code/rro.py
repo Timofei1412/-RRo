@@ -2,10 +2,9 @@ import sensor, image, time, pyb
 
 # === variables ===
 # declarations
-last_saw = 0                        # last time when camera saw object
 past = False                        # is box already behind
-flag = True                         # main loop flag
-B = None                            # pin B
+flag = 12                           # main loop flag
+button = None                       # button pin
 tim = None                          # timer
 motor = None                        # pwm for motor
 ser = None                          # serial
@@ -13,14 +12,14 @@ cur_com = "None"                    # current command
 line_mutex = "free"                 # manager for line turn
 # options
 cur_ang = 0                         # servo angle
-ang = 10                            # servo angle on detour
-turn = 15                           # servo angle on rotation
+base_ang = -10                       # base angle without mods
+ang = 30                            # servo angle on detour
+turn = 30                           # servo angle on rotation
 debug = True                        # enable debug information
 speed_of_servo = 1500               # servo rotation speed
 Motor_speed = 0                     # motor speed
 near_dist_area = 700                # distance to box for trigger
-saw_interval = 1000                 # time in millis to rotate back
-wall_diff_normal = 500              # normal difference between walls sizes
+wall_diff_normal = 1000              # normal difference between walls sizes
 line_min_size = 500                 # minimum size for line to turn
 sensor_color_format = sensor.RGB565 # sensor colors type
 sensor_res = sensor.QQVGA           # sensor resolution
@@ -63,13 +62,11 @@ lines_roi = (0, 64, 160, 34)
 
 def main_init():
     # set global variables
-    global B, tim, motor, ser, sensor, clock, last_saw
+    global button, tim, motor, ser, sensor, clock, last_saw
     # motors part
-    B = pyb.Pin('P5', pyb.Pin.OUT_PP)                           # init pin b on P5
-    B.value(1)                                                  # set pin b value
+    button = pyb.Pin('P0', pyb.Pin.IN, pyb.Pin.PULL_UP)         # init button's pin
     tim = pyb.Timer(2, freq=1000)                               # init timer
     motor = tim.channel(3, pyb.Timer.PWM, pin=pyb.Pin('P4'))    # init motor pwm on P6
-    motor.pulse_width_percent(Motor_speed)                      # start motor
     ser = pyb.Servo(1)                                          # init servo on P7
     ser.angle(0)                                                # set servo startup position
     # sensor part
@@ -80,7 +77,6 @@ def main_init():
     sensor.set_hmirror(True)                                    # mirror camera view
     sensor.skip_frames(time = 2000)                             # skip some frames for camera initalization
     clock = time.clock()                                        # start internal timer
-    last_saw = pyb.millis()                                     # setup rotation timer
 
 def debug_roi(img: Image, roi: tuple, color: tuple):
     if roi == None:
@@ -145,10 +141,10 @@ def find_diffs_params(left_wall_pix: int, right_wall_pix: int):
     return diff, diff_res
 
 
-def cam_get_state(flag: bool):
+def cam_get_state():
     ''' get positional information from camera '''
     # enable camera global control
-    global img, clock, sensor, last_saw, line_mutex
+    global img, clock, sensor, line_mutex, flag
 
     # internal camera functions
     clock.tick()
@@ -164,10 +160,6 @@ def cam_get_state(flag: bool):
     nearest_blob_green = find_nearest_blob(blobs_green)
     nearest_blob, cur_com = get_nearest_from_two(nearest_blob_red, nearest_blob_green)
 
-    # set variable for movement
-    if nearest_blob != None and nearest_blob.area() > near_dist_area:
-        last_saw = pyb.millis()
-
     # find left and right walls sizes
     left_wall_pix = sum([x.area() for x in img.find_blobs([blackTh], roi=wall_left_roi)])
     right_wall_pix = sum([x.area() for x in img.find_blobs([blackTh], roi=wall_right_roi)])
@@ -178,23 +170,24 @@ def cam_get_state(flag: bool):
     if orange_line >= line_min_size:
         if line_mutex == "free" or line_mutex == "after_blue":
             line_mutex = "orange_line"
-            cur_com = "right"
+            #cur_com = "right"
+            flag -= 1
         elif line_mutex == "blue_line":
             line_mutex = "after_orange"
-            cur_com = "None"
+            #cur_com = "None"
     elif blue_line >= line_min_size:
         if line_mutex == "free" or line_mutex == "after_orange":
             line_mutex = "blue_line"
-            cur_com = "left"
+            #cur_com = "left"
+            flag -= 1
         elif line_mutex == "orange_line":
             line_mutex = "after_blue"
-            cur_com = "None"
-
-    print(line_mutex)
+            #cur_com = "None"
 
     # print (and draw) some technical info
     if debug:
-        if True:
+        print(line_mutex)
+        if False:
             binary_roi(img, [orangeTh, blueTh], lines_roi)
         else:
             debug_blobs(img, blobs_green, (0, 255, 0))
@@ -206,32 +199,48 @@ def cam_get_state(flag: bool):
             debug_roi(img, lines_roi, (255, 0, 0))
 
     # return required information
-    return cur_com, (pyb.millis() - last_saw) > saw_interval, diff_res, flag
+    return cur_com, diff_res
 
 
 def main_loop():
-    global ser
-    while flag:
-        past = None             # already behind
+    global ser, button, base_ang
+    # wait for button press
+    if not debug:
+        while button.value() == 1:
+            pass
+        # wait for second
+        pyb.delay(1000)
+
+    motor.pulse_width_percent(Motor_speed) # start motor
+
+    while flag > 0:
         cur_com = None          # current command
         wall_status = None      # position relative to walls
 
         # get info from camera
-        cur_com = cam_get_state(flag)
+        cur_com, wall_status = cam_get_state()
 
-        cur_ang = 0
-        if cur_com == "green" and past == False:
-            cur_ang = ang
-        elif cur_com == "red" and past == False:
-            cur_ang = -ang
-        elif cur_com == "green" and past == True:
-            cur_ang = -ang
-        elif cur_com == "red" and past == True:
-            cur_ang = ang
+        if debug:
+            print(cur_com, wall_status)
+
+        cur_ang = base_ang
+        if wall_status == "too_left":
+            print("eee")
+            cur_ang = base_ang+ang
+        elif wall_status == "too_right":
+            cur_ang = base_ang-ang
+        elif cur_com == "green":
+            cur_ang = base_ang+ang
+        elif cur_com == "red":
+            cur_ang = base_ang-ang
         elif cur_com == "right":
-            cur_ang = turn
+            cur_ang = base_ang+turn
         elif cur_com == "left":
-            cur_ang = -turn
+            cur_ang = base_ang-turn
+        else:
+            cur_ang = base_ang
+
+        print(cur_ang)
 
         ser.angle(cur_ang)
         # ser.angle(cur_ang, speed_of_servo)
