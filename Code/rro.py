@@ -10,65 +10,52 @@ motor = None                        # pwm for motor
 ser = None                          # serial
 cur_com = "None"                    # current command
 line_mutex = "free"                 # manager for line turn
-# options
 cur_ang = 0                         # servo angle
-base_ang = -10                       # base angle without mods
-ang = 30                            # servo angle on detour
-turn = 30                           # servo angle on rotation
-debug = True                        # enable debug information
-speed_of_servo = 1500               # servo rotation speed
-Motor_speed = 0                     # motor speed
-near_dist_area = 700                # distance to box for trigger
-wall_diff_normal = 1000              # normal difference between walls sizes
+# led
+red_led = None
+green_led = None
+blue_led = None
+# options
+base_ang = -10                      # base angle without mods
+ang = 25                            # servo angle on detour
+aligment = 25                       # servo angle on detour
+turn = 15                           # servo angle on rotation
+debug = False                       # enable debug information
+speed_of_servo = 500                # servo rotation speed ( more is lower )
+Motor_speed = 40                    # motor speed
+near_dist_area = 50                 # distance to box for trigger
+wall_diff_normal = 10               # normal difference between walls sizes
 line_min_size = 500                 # minimum size for line to turn
 sensor_color_format = sensor.RGB565 # sensor colors type
 sensor_res = sensor.QQVGA           # sensor resolution
 # Thresholds
-greenTh  = (31, 64, -50, -28, 18, 53)
-redTh    = (19, 60, 29, 80, 6, 54)
+greenTh  = (32, 51, -45, -10, 10, 50)
+redTh    = (10, 50, 24, 46, -3, 41)
 blueTh   = (19, 68, -10, 18, -48, -12)
 orangeTh = (35, 62, 4, 57, -9, 81)
 blackTh  = (0, 18, -15, 9, -12, 13)
-whiteTh  = (59, 100, -10, 4, -12, 3)
+whiteTh  = (59, 100, -10, 4, -12, 3)  # unused
 # regions of interests
-boxes_roi = (0, 35, 160, 50)
-wall_left_roi = (0, 0, 80, 95)
-wall_right_roi = (80, 0, 80, 95)
+boxes_roi = (10, 78, 134, 35)
+wall_left_roi = (0, 0, 1, 120)
+wall_right_roi = (159, 0, 1, 120)
 lines_roi = (0, 64, 160, 34)
-
-
-# === code logic ===
-'''
-    if camera just saw box:
-        cur_com = box_color
-        past = False
-        #  Wait some time
-        past = True
-        #  Wait some time
-        cur_com = None
-        past = False
-
-    if camera just saw a turn:
-        cur_com = turn direction
-        past = False
-        #  Wait some time
-        cur_com = None
-
-    if camera saw 12'th turn:
-        flag = False
-'''
 
 # === functions ===
 
 def main_init():
     # set global variables
-    global button, tim, motor, ser, sensor, clock, last_saw
+    global button, tim, motor, ser, sensor, clock, last_saw, red_led, green_led, blue_led
     # motors part
     button = pyb.Pin('P0', pyb.Pin.IN, pyb.Pin.PULL_UP)         # init button's pin
     tim = pyb.Timer(2, freq=1000)                               # init timer
     motor = tim.channel(3, pyb.Timer.PWM, pin=pyb.Pin('P4'))    # init motor pwm on P6
     ser = pyb.Servo(1)                                          # init servo on P7
-    ser.angle(0)                                                # set servo startup position
+    ser.angle(base_ang)                                         # set servo startup position
+    # enable led colors
+    red_led = pyb.LED(1)
+    green_led = pyb.LED(2)
+    blue_led = pyb.LED(3)
     # sensor part
     sensor.reset()                                              # reset previous camera settings
     sensor.set_pixformat(sensor_color_format)                   # set colored output
@@ -144,7 +131,8 @@ def find_diffs_params(left_wall_pix: int, right_wall_pix: int):
 def cam_get_state():
     ''' get positional information from camera '''
     # enable camera global control
-    global img, clock, sensor, line_mutex, flag
+    global img, clock, sensor, line_mutex, flag, red_led, green_led, blue_led
+    cur_com = None
 
     # internal camera functions
     clock.tick()
@@ -163,32 +151,47 @@ def cam_get_state():
     # find left and right walls sizes
     left_wall_pix = sum([x.area() for x in img.find_blobs([blackTh], roi=wall_left_roi)])
     right_wall_pix = sum([x.area() for x in img.find_blobs([blackTh], roi=wall_right_roi)])
+    if debug:
+        print(left_wall_pix, right_wall_pix)
     diff, diff_res = find_diffs_params(left_wall_pix, right_wall_pix)
 
-    orange_line = sum([x.area() for x in img.find_blobs([orangeTh], roi=lines_roi)])
-    blue_line = sum([x.area() for x in img.find_blobs([blueTh], roi=lines_roi)])
+    orange_lines = img.find_blobs([orangeTh], roi=lines_roi)
+    blue_lines = img.find_blobs([blueTh], roi=lines_roi)
+    orange_line = sum([x.area() for x in orange_lines])
+    blue_line = sum([x.area() for x in blue_lines])
+
+    if debug:
+        debug_blobs(img, orange_lines, (255, 120, 0))
+        debug_blobs(img, blue_lines, (0, 80, 128))
+        print(orange_line)
+        print(blue_line)
+
     if orange_line >= line_min_size:
-        if line_mutex == "free" or line_mutex == "after_blue":
+        if line_mutex == "free" or line_mutex == "after_blue" or line_mutex == "orange_line":
+            red_led.on()
             line_mutex = "orange_line"
-            #cur_com = "right"
-            flag -= 1
-        elif line_mutex == "blue_line":
+            cur_com = "right"
+        else:
+            red_led.off()
+        if line_mutex == "blue_line":
             line_mutex = "after_orange"
-            #cur_com = "None"
-    elif blue_line >= line_min_size:
-        if line_mutex == "free" or line_mutex == "after_orange":
-            line_mutex = "blue_line"
-            #cur_com = "left"
             flag -= 1
-        elif line_mutex == "orange_line":
+    elif blue_line >= line_min_size:
+        if line_mutex == "free" or line_mutex == "after_orange" or line_mutex == "blue_line":
+            blue_led.on()
+            line_mutex = "blue_line"
+            cur_com = "left"
+        else:
+            blue_led.off()
+        if line_mutex == "orange_line":
             line_mutex = "after_blue"
-            #cur_com = "None"
+            flag -= 1
 
     # print (and draw) some technical info
     if debug:
         print(line_mutex)
         if False:
-            binary_roi(img, [orangeTh, blueTh], lines_roi)
+            binary_roi(img, [blackTh], lines_roi)
         else:
             debug_blobs(img, blobs_green, (0, 255, 0))
             debug_blobs(img, blobs_red, (255, 0, 0))
@@ -203,11 +206,13 @@ def cam_get_state():
 
 
 def main_loop():
-    global ser, button, base_ang
+    global ser, button, base_ang, red_led, green_led, blue_led
     # wait for button press
     if not debug:
+        green_led.on()
         while button.value() == 1:
             pass
+        green_led.off()
         # wait for second
         pyb.delay(1000)
 
@@ -220,30 +225,37 @@ def main_loop():
         # get info from camera
         cur_com, wall_status = cam_get_state()
 
+        cur_ang = base_ang
+
         if debug:
-            print(cur_com, wall_status)
+            print(cur_com)
+
+        if wall_status == "normal":
+            green_led.on()
+        else:
+            green_led.off()
 
         cur_ang = base_ang
-        if wall_status == "too_left":
-            print("eee")
-            cur_ang = base_ang+ang
-        elif wall_status == "too_right":
-            cur_ang = base_ang-ang
-        elif cur_com == "green":
-            cur_ang = base_ang+ang
-        elif cur_com == "red":
-            cur_ang = base_ang-ang
-        elif cur_com == "right":
-            cur_ang = base_ang+turn
-        elif cur_com == "left":
-            cur_ang = base_ang-turn
-        else:
-            cur_ang = base_ang
 
-        print(cur_ang)
+        if cur_com == "green":
+            cur_ang -= ang
+        elif cur_com == "red":
+            cur_ang += ang
+        elif wall_status == "too_left":
+            cur_ang += aligment
+        elif wall_status == "too_right":
+            cur_ang -= aligment
+
+        if cur_com == "right":
+            cur_ang += turn
+        elif cur_com == "left":
+            cur_ang -= turn
+
+        if debug:
+            print(cur_ang)
 
         ser.angle(cur_ang)
-        # ser.angle(cur_ang, speed_of_servo)
+        #ser.angle(cur_ang, speed_of_servo)
 
 
 # === main code ===
@@ -251,7 +263,7 @@ def main_loop():
 def main():
     main_init()
     main_loop()
-    ser.angle(0)                    # return servo to normal position
+    ser.angle(base_ang)             # return servo to normal position
     motor.pulse_width_percent(0)    # speed down
 
 # execute code
